@@ -1,0 +1,378 @@
+---
+title: "SummaryStat"
+author: "Keita, Mo, Anthony"
+date: "11/14/2018"
+output: html_document
+---
+
+## Group Project {.tabset .tabset-fade}
+
+```{r, echo=TRUE}
+rm(list = ls())
+install.packages("Metrics")
+library(MASS)
+library(ggplot2)
+library(Metrics)
+library(corrplot)
+library(car)
+library(leaps)
+library(dplyr)
+library(coefplot)
+library(doBy) 
+library(boot) 
+library(useful)
+library(glmnet)
+library(plotmo)
+library(glmnetUtils)
+library(devtools)
+library(useful)
+library(glmnet)
+library(rpart)
+library(leaps)
+install.packages("caret")
+install.packages("lmtest")
+library(lmtest)
+library(caret)
+library(Hmisc)
+library(car)
+install.packages("gvlma")
+library(gvlma)
+library(randomForest)
+install_github("jacobkap/fastDummies")
+```
+
+### Dataset
+```{r}
+# setwd("/Users/muhammadkarkoutli/Desktop/") # set working directory
+# setwd("/Users/sugan103/Downloads/")
+getwd()
+setwd("C:/Users/Anthony/Downloads")
+data.raw <- read.csv('greekmgscdateset2.csv', header = TRUE) # import 2015 data csv file
+#data.raw$Weekend <- ifelse(data.raw$Week.Day == "Saturday" | data.raw$Week.Day == "Sunday", 1,0)
+
+#data.raw$Week.Day <- factor(data.raw$Week.Day, levels = c("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"))
+
+# data.raw$Month <- factor(data.raw$Month, levels = c("January", "Feburary", "March", 
+                                            #"April", "May", "June", 
+                                            #"July", "August", "September", 
+                                            #"October", "November", "December"))
+data.binary <- data.raw
+data.binary <- fastDummies::dummy_cols(data.binary, select_columns = c("Month","Week.Day"))
+data.binary <- data.binary[ , -which(names(data.binary) %in% c("Month", "Week.Day"))]
+
+```
+
+### Summary
+```{r}
+summary(data.raw)
+data <- data.binary
+View(data)
+```
+
+### Remove unneccessary varaibles
+```{r}
+data <- data[ , -which(names(data) %in% c("Date"))] # careful deleting only Date
+data <- data[ , -which(names(data) %in% c("Percentage.Change.in.Sales", "American.Express", "Visa", "MasterCard", "Discover"))]
+names(data)
+```
+
+
+### Creating training set and validation set
+```{r}
+# creating training and validation for "Data"
+data$delta.volume <- diff(c(NA, data$Daily.Volume)) / lag(data$Daily.Volume)
+data$delta.volume
+  # testDF <- validation_set
+  # testDF$delta.volume <- diff(c(NA, testDF$Daily.Volume)) / lag(testDF$Daily.Volume)
+  # testDF <- select(testDF, -c("Daily.Volume"))
+
+
+
+
+# detrending didn't seem to do much.
+data$lagsales <- lag(data$Sum.of.Gross.Sales)
+data$lagtip <- lag(data$Average.tip)
+data$delta.sumtip <- diff(c(NA, data$SumTip)) / lag(data$SumTip)
+data <- data[, -which(names(data) %in% c("Sum.of.Gross.Sales", "Average.tip", "SumTip", "Daily.Volume"))]
+
+is.na(data) <- sapply(data, is.infinite)
+data[is.na(data)] <- 0
+
+cor(data$delta.volume, data)
+View(data)
+options(scipen = 99)
+set.seed(1861)
+trainSize <- 0.5
+trainInd <- sample(1:nrow(data), size = floor(nrow(data) * trainSize))
+train_set <- data[trainInd, ]
+test_set <- data[-trainInd, ]
+View(train_set)
+View(test_set)
+# making life simpler
+attach(train_set)
+```
+
+### Plots / data-visualizations
+``` {r}
+
+options(scipen = 99)
+
+plot(data.raw$Temp..Farenheit.,data.raw$Average.tip, type = "p", data = data.raw, col = "lightblue")
+hist(data.raw$Discover, data = data.raw, col = "lightblue")
+hist(data.raw$MasterCard, data = data.raw, col = "red")
+hist(data.raw$Visa, data = data.raw, col = "green")
+hist(data.raw$American.Express, data = data.raw, col = "brown")
+```
+### OLS MODEL TEST
+```{r}
+# Y variable is daily.volume
+# Testing OLS model of  data
+
+# OLS for normal train set
+ols <- lm(delta.volume~., data = train_set)
+summary(ols)
+
+                                  # Test for assumptions normal train set
+mean(ols$residuals)             # mean of residual is close to 0 ====> GOOD
+plot(ols)
+# Homoscedasticity Test ==> lines are pretty straight ==> 2 otuliers 
+
+train_set_cor <- train_set[, -which(names(train_set) %in% c("Week.Day", "Month"))]
+names(train_set_cor)
+
+?cor.test
+
+for (i in 1:ncol(train_set_cor)) {
+  a <- cor.test(train_set_cor[,i], ols$residuals)
+  print(paste(colnames(train_set_cor)[i], "est corr:", a$estimate, "pvalue: ", a$p.value)) # testing correlation between predictor value and residual: they should not be correlated because in order for the estimator to have certain desirable properties
+}                                 # each variable does not uncorrelated, however, the p-value seems to be too high
+
+
+bptest(test1)                     # testing for Heteroscedasticity ==> p-value is 0.324, p > 0.05 => exist. => BAD
+
+```
+
+
+### SUBSET MATRIX
+```{r}
+summary(ols)
+data.subset <- subset(train_set, select = c(Daily.Volume, Week.Day, American.Express, Discover, MasterCard, Visa, Tempe.Marketplace...Arizona., Month))
+pairs.panels(data.subset, col = "red")
+```
+
+### correlation matrix - Test for multicollinearity
+```{r}
+names(train_set)
+cor <- cor(train_set[,2:17])
+corrplot(cor, method = "square", type = "upper")
+```
+SumTip and Visa appears to be very correlated to each other. 
+This could potentially cause problems with multicolinearity.
+
+### Plotting Xs
+```{r}
+for (i in 1:ncol(train_set)){
+  plot(train_set[, i], main = colnames(train_set[i]), col = 'dodgerblue3')
+}
+```
+Remove data that seems to have too many outliers or strange.
+
+### VISUALIZE Y-vs-X [only plotting data with R2 higher than 1%]
+```{r}
+visualize <- train_set[,-c(3)]
+for (i in 1:ncol(visualize)){
+  reg <- lm(Daily.Volume ~ visualize[, i])
+  reg.r2 <- summary(reg)$adj.r.squared
+  if (reg.r2 >= 0.5){
+    plot(Daily.Volume ~ visualize[, i], main = paste("Daily.Vol.-vs-", colnames(visualize[i])), col = "dodgerblue3")
+    abline(reg, col = "red", lty = 5, lwd = 2) 
+    legend("topright", bty = "n", text.col = "red", legend = paste("R2:", format(round(reg.r2, 3), digits = 2)))
+  } 
+}
+```  
+
+### linear model data set, variables selected from corplot
+```{r}
+
+names(train_set)
+mod2 <- lm(delta.volume ~  . -Weekend - Month, data = train_set)
+plot(mod2)
+summary(mod2)
+vif(mod2)
+# detrending didn't seem to fix all the issues
+# VIF for mod2 does seem to be doing better
+```
+
+### Stepwise selection for delta.volume
+```{r}
+names(train_set)
+
+mod1 <- regsubsets(delta.volume ~., data = train_set, method ="forward")
+plot(mod1, scale = "adjr2")
+summary(mod1)
+mod1.lm <- lm(delta.volume ~ Week.Day_Saturday + lagtip + Week.Day_Sunday + Month_July + Visa + Month_November + MasterCard + Month_April + Week.Day_Monday, data = train_set)
+summary(mod1.lm)
+
+
+
+mod2 <- regsubsets(delta.volume ~., data = train_set, method ="backward")
+plot(mod2, scale = "adjr2")
+summary(mod2)
+mod2.lm <- lm(delta.volume ~ MasterCard + Month_November + Week.Day_Thursday + Week.Day_Wednesday + Week.Day_Tuesday + Week.Day_Monday + School + Visa + Week.Day_Friday, data = train_set)
+summary(mod2.lm)
+
+mod1.pred <- predict(mod1.lm, data = test_set)
+mod1.pred.train <- predict(mod1.lm, data = train_set)
+mod2.pred <- predict(mod2.lm, data = test_set)
+mod2.pred.train <- predict(mod2.lm, data = test_set)
+RMSE <- function(true, preds) {sqrt(mean((true - preds)^2))}
+mod1RMSEtrain <- RMSE(train_set$delta.volume, mod1.pred.train)
+mod1RMSEtest <- RMSE(test_set$delta.volume, mod1.pred)
+mod2RMSEtrain <- RMSE(train_set$delta.volume, mod1.pred.train)
+mod2RMSEtest <- RMSE(test_set$delta.volume, mod2.pred)
+mod1RMSEtrain
+mod1RMSEtest
+mod2RMSEtrain
+mod2RMSEtest
+```
+
+
+### Lasso Model
+```{r}
+View(train_set)
+myformula <- as.formula(train_set$delta.volume ~ .)
+Xvar <- build.x(formula = myformula, data= train_set)
+Yvar <- build.y(formula = myformula, data= train_set)
+myform <- as.formula(test_set$delta.volume~.)
+Xvar2 <- build.x(formula = myform, data = test_set)
+Yvar2 <- build.y(formula = myform, data = test_set)
+LassoFit <- cv.glmnet(x = Xvar, y = Yvar, alpha = 1)
+summary(LassoFit)
+coef(LassoFit, s= "lambda.1se")
+coef(LassoFit, s= "lambda.min")
+plot(LassoFit)
+r2Lasso.min <- LassoFit$glmnet.fit$dev.ratio[which(LassoFit$glmnet.fit$lambda == LassoFit$lambda.min)]
+r2Lasso.1se <- LassoFit$glmnet.fit$dev.ratio[which(LassoFit$glmnet.fit$lambda == LassoFit$lambda.1se)]
+
+r2Lasso.min
+r2Lasso.1se
+
+#Lasso plot for Daily Volume
+plotmo::plot_glmnet(x = LassoFit$glmnet.fit, xvar = "lambda", label = 10)
+coefplot::coefpath(LassoFit)
+
+
+
+c1 <- coef(LassoFit, s= "lambda.1se")
+c2 <- coef(LassoFit, s= "lambda.min")
+
+coeflasso <- cbind(c1,c2)
+colnames(coeflasso) <- c("LassoFit.1se", "LassoFit.min")
+coeflasso
+lasso.pred <- predict(LassoFit, s = "lambda.1se", newx = Xvar2)
+lasso.pred.train <- predict(LassoFit, s = "lambda.1se", newx = Xvar)
+head(lasso.pred)
+coeflasso
+RMSE <- function(true, preds) {sqrt(mean((true - preds)^2))}
+LassoRMSEtrain <- RMSE(train_set$delta.volume, lasso.pred.train)
+LassoRMSEtest <- RMSE(test_set$delta.volume, lasso.pred)
+LassoRMSEtrain
+LassoRMSEtest
+```
+
+
+### ElasticNet
+```{r}
+?train
+elasticFit <- train(
+  delta.volume ~., data = train_set, method = "glmnet",
+  trControl = trainControl("cv", number = 10),
+  tuneLength = 10
+)
+
+# Best tuning parameter
+elasticFit$bestTune # alpha 0.4 is the most optimal
+coef(elasticFit$finalModel, elasticFit$bestTune$lambda)
+plot(elasticFit)
+
+elasticMod <- cv.glmnet(x = Xvar, y = Yvar, alpha = 0.75)
+plot(elasticMod)
+coef(elasticMod, s = "lambda.1se")
+r2elastic.1se <- elasticMod$glmnet.fit$dev.ratio[which(elasticMod$glmnet.fit$lambda == elasticMod$lambda.1se)]
+r2elastic.1se
+RMSE <- function(true, preds) {sqrt(mean((true - preds)^2))}
+elastic.pred <- predict(elasticMod, s = "lambda.1se", newx = Xvar2)
+elastic.pred.train <- predict(elasticMod, s = "lambda.1se", newx =Xvar)
+elasticRMSEtrain <- RMSE(train_set$delta.volume, elastic.pred.train)
+elasticRMSEtest <- RMSE(test_set$delta.volume, elastic.pred)
+elasticRMSEtrain
+elasticRMSEtest
+```
+
+
+### Tree model for Daily Volumes:
+
+```{r}
+require('ISLR')
+require('tree')
+
+hist(Sum.of.Gross.Sales)
+
+str(data.raw)
+
+volTREE <- tree(Daily.Volume ~ Sum.of.Gross.Sales + Average.tip, data = data.raw)
+summary(volTREE)
+plot(volTREE)
+text(volTREE, pretty = 0)
+ rparttree
+
+```
+
+### Logistic Regression tips
+
+```{r}
+data.raw$MasterCard <- as.numeric(data.raw$MasterCard)
+data.raw$Visa <- as.numeric(data.raw$Visa)
+data.raw$Discover <- as.numeric(data.raw$Discover)
+data.raw$Express <- as.numeric(data.raw$American.Express)
+data.raw$School <- as.factor(data.raw$School)
+data.raw$Temp..Farenheit.<- as.numeric(data.raw$Temp..Farenheit.)
+data.raw$SumTip <- as.numeric(data.raw$SumTip)
+
+names(data.raw)
+glmfit <- glm(data = data.raw, SumTip ~ MasterCard + Visa + Discover + American.Express + School + Temp..Farenheit. + Week.Day)
+summary(glmfit)
+
+options(scipen = 100)
+exp(glmfit$coefficients)
+```
+
+A 1 unit increase Mastercard increases the odds of a customer to give a tip by a factor of 2.7502898937
+
+A 1 unit increase in Visa increases the odds of a customer to give a tip by a factor of 3.0129340091
+
+A 1 unit increase in Discover increases the odds of a customer to give a tip by a factor of 5.3024717975
+
+A 1 unit increase in American.Express increases the odds of a customer to give a tip by a factor of 4.2587949172
+
+A 1 unit increase in School increases the odds of a customer to give a tip by a factor of 0.2074798988
+
+A 1 unit increase in Temp..Farenheit increases the odds of a customer to give a tip by a factor of 0.8628648148
+
+A 1 unit increase in  Week.DayMonday  increases the odds of a customer to give a tip by a factor of 0.0002611721
+
+A 1 unit increase in Week.DaySaturday   increases the odds of a customer to give a tip by a factor of 131853.1841896248
+
+A 1 unit increase in Week.DaySunday   increases the odds of a customer to give a tip by a factor of 23.1139138966
+
+A 1 unit increase in Week.DayThursday increases the odds of a customer to give a tip by a factor of 0.0750009276
+
+A 1 unit increase in Week.DayTuesday increases the odds of a customer to give a tip by a factor of 0.0016524478
+
+A 1 unit increase in Week.DayWednesday increases the odds of a customer to give a tip by a factor of 0.0019371058
+
+
+### TIPPING
+```{r}
+names(train_set)
+```
